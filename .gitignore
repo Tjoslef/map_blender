@@ -7,3 +7,4 @@ tmp_*.json
 output.json
 *.gpx
 *.png
+.venv
