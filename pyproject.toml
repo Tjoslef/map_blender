@@ -1,0 +1,42 @@
+[tool.ruff.lint]
+# Refer to https://docs.astral.sh/ruff/rules/ to see the full list of rules and their codes.
+# Or just follow the error messages ruff gives you. :)
+select = [
+    "A",      # builtins
+    "BLE001", # blind-except
+    "B",      # bugbear
+    "C4",     # comprehensions
+    "C90",    # mccabe - complexity checker
+    "DTZ",    # datetimez
+    "D100",   # missing docstring in public module
+    "D101",   # missing docstring in public class
+    "D102",   # missing docstring in public method
+    "D206",   # docstring indentation
+    "D207",
+    "D208",
+    "D209",
+    "D210",
+    "E",      # pycodestyle errors
+    "EXE",    # executable
+    "FIX",    # fixme
+    "F",      # pyflakes
+    "ISC",    # implicit-str-concat
+    "I",      # isort
+    "INP",    # no-pep420
+    "LOG",    # logging
+    "N",      # pep8-naming
+    "PERF",   # perflint
+    "PTH",    # use-pathlib
+    "PIE",    # pie
+    "Q",      # quotes
+    "RUF",    # ruff-specific
+    "RET",    # return
+    "S",      # bandit
+    "SIM",    # simplify
+    "UP",     # pyupgrade
+    "W"       # pycodestyle warnings
+]
+ignore = [
+    "S101", # assert
+    "RUF003" # hyphens
+]

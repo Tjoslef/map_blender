@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+
+# Local data / temporary files
+tmp_*.json
+output.json
+*.gpx
