@@ -2,6 +2,7 @@ import json
 import math
 import os
 from io import BytesIO
+from pathlib import Path
 
 import requests
 from PIL import Image
@@ -16,9 +17,10 @@ try:
     from dotenv import load_dotenv
 except ModuleNotFoundError:
 
-    def load_dotenv():
+    def load_dotenv(dotenv_path=None):
         try:
-            with open(".env") as env_file:
+            env_path = Path(dotenv_path) if dotenv_path else BASE_DIR / ".env"
+            with open(env_path) as env_file:
                 for line in env_file:
                     line = line.strip()
                     if not line or line.startswith("#") or "=" not in line:
@@ -30,8 +32,9 @@ except ModuleNotFoundError:
         return False
 
 
-load_dotenv()
-GRID_RESOLUTION = 20
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
+GRID_RESOLUTION = 120
 API_KEY = os.getenv("GEOLOCATION_API_KEY")
 
 
@@ -81,7 +84,6 @@ class Route:
         print(f"Automatically assigning projection to {epsg_target} (UTM Zone {zone})")
 
         transformer = Transformer.from_crs("EPSG:4326", epsg_target, always_xy=True)
-        processed_coords = []
         start_x, start_y = transformer.transform(start_lon, start_lat)
         start_z = route_elevations[0]
         # 4. Format Flat Terrain Output Matrix
@@ -108,7 +110,7 @@ class Route:
         }
         with open(output_json_path, "w") as f:
             json.dump(output_data, f, indent=4)
-        return processed_coords
+        return output_data
 
 
 class Map:

@@ -18,6 +18,23 @@ class PipelineResult:
     bounds: tuple[int, int, int, int]
 
 
+def from_file(json_path: str | Path, image_path: str | Path) -> PipelineResult:
+    with open(json_path) as f:
+        data = json.load(f)
+
+    map_image = Image.open(image_path)
+
+    return PipelineResult(
+        map_image=map_image,
+        terrain=data["terrain"],
+        route_xyz=data["route"],
+        grid_size=data["grid_size"],
+        raw_points=[],
+        route_elevations=[],
+        bounds=(0, 0, 0, 0),
+    )
+
+
 def run(gpx_path: str | Path, zoom: int = 16) -> PipelineResult:
     route = Route(str(gpx_path))
     raw_points, route_elevations = route.parse_gpx("output.json")
