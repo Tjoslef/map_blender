@@ -1,21 +1,54 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Literal, TypedDict
 
-from PIL.Image import Image
+from PIL import Image
 
-from gpx_con import Map, Route
+from gpx_con import Map, OSMFeatures, Route
+
+
+class XYPoint(TypedDict):
+    x: float
+    y: float
+
+
+# 2. Define the structured OpenStreetMap feature format
+class OSMFeatureItem(TypedDict):
+    id: int
+    type: Literal["building", "forest", "road", "water", "unknown"]
+    tags: dict[str, Any]
+    geometry: list[XYPoint]
 
 
 @dataclass
 class PipelineResult:
-    map_image: Image
+    map_image: Image.Image
     terrain: list[dict]
     route_xyz: list[dict]
     grid_size: int
     raw_points: list[tuple[float, float]]
     route_elevations: list[float]
     bounds: tuple[int, int, int, int]
+    features: list[OSMFeatureItem]
+
+    def __getitem__(self, key: str):
+        key_map = {
+            "terrain": self.terrain,
+            "route": self.route_xyz,  # maps 'route' key to route_xyz attribute
+            "route_xyz": self.route_xyz,
+            "grid_size": self.grid_size,
+            "features": self.features,
+            "bounds": self.bounds,
+            "map_image": self.map_image,
+            "raw_points": self.raw_points,
+            "route_elevations": self.route_elevations,
+        }
+
+        if key in key_map:
+            return key_map[key]
+
+        raise KeyError(f"'{key}' is not a valid attribute of PipelineResult")
 
 
 def from_file(json_path: str | Path, image_path: str | Path) -> PipelineResult:
@@ -32,6 +65,7 @@ def from_file(json_path: str | Path, image_path: str | Path) -> PipelineResult:
         raw_points=[],
         route_elevations=[],
         bounds=(0, 0, 0, 0),
+        features=data["features"],
     )
 
 
@@ -45,8 +79,14 @@ def run(gpx_path: str | Path, zoom: int = 16) -> PipelineResult:
     terrain_elevations = map_instance.gettingElevation(grid_coords)
 
     output_json = "output.json"
+    osm_raw_data = OSMFeatures.fetch_features(x_min, x_max, y_min, y_max, zoom)
     route.transformationCord(
-        raw_points, output_json, grid_coords, terrain_elevations, route_elevations
+        raw_points,
+        output_json,
+        grid_coords,
+        terrain_elevations,
+        route_elevations,
+        osm_features=osm_raw_data,
     )
 
     with open(output_json) as f:
@@ -62,4 +102,5 @@ def run(gpx_path: str | Path, zoom: int = 16) -> PipelineResult:
         raw_points=raw_points,
         route_elevations=route_elevations,
         bounds=(x_min, x_max, y_min, y_max),
+        features=output_data["features"],
     )

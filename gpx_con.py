@@ -44,12 +44,10 @@ class Route:
 
     def get_utm_epsg(self, lat, lon):
         zone_number = int(math.floor((lon + 180) / 6) + 1)
-
         if lat >= 0:
             epsg_code = f"EPSG:326{zone_number:02d}"
         else:
             epsg_code = f"EPSG:327{zone_number:02d}"
-
         return epsg_code, zone_number
 
     def parse_gpx(self, output_json_path):
@@ -76,9 +74,9 @@ class Route:
         grid_coords: list[tuple[float, float]],
         terrain_elevations: list[float],
         route_elevations: list[float],
+        osm_features=None,  # Added parameter for OSM data
     ):
-
-        start_lat, start_lon = raw_points[0]
+        start_lat, start_lon = grid_coords[0]
         epsg_target, zone = self.get_utm_epsg(start_lat, start_lon)
         print(f"Detected Location: Lat {start_lat}, Lon {start_lon}")
         print(f"Automatically assigning projection to {epsg_target} (UTM Zone {zone})")
@@ -86,7 +84,8 @@ class Route:
         transformer = Transformer.from_crs("EPSG:4326", epsg_target, always_xy=True)
         start_x, start_y = transformer.transform(start_lon, start_lat)
         start_z = route_elevations[0]
-        # 4. Format Flat Terrain Output Matrix
+
+        # Format Flat Terrain Output Matrix
         json_terrain = []
         for (lat, lon), ele in zip(grid_coords, terrain_elevations, strict=False):
             gx, gy = transformer.transform(lon, lat)
@@ -94,7 +93,7 @@ class Route:
                 {"x": gx - start_x, "y": gy - start_y, "z": ele - start_z}
             )
 
-        # 5. Format Route Path Output
+        # Format Route Path Output
         json_route = []
         for (lat, lon), ele in zip(raw_points, route_elevations, strict=False):
             gx, gy = transformer.transform(lon, lat)
@@ -102,11 +101,67 @@ class Route:
                 {"x": gx - start_x, "y": gy - start_y, "z": ele - start_z}
             )
 
+        # Process OSM Features to localized coordinates
+        formatted_features = []
+        if osm_features and "elements" in osm_features:
+            # Map node IDs to coordinates for quick lookup
+            nodes_lookup = {
+                el["id"]: (el["lat"], el["lon"])
+                for el in osm_features["elements"]
+                if el["type"] == "node"
+            }
+
+            for el in osm_features["elements"]:
+                if el["type"] == "way":
+                    feature_type = "unknown"
+                    tags = el.get("tags", {})
+
+                    if "building" in tags:
+                        feature_type = "building"
+                    elif (
+                        "natural" in tags
+                        and tags["natural"] == "wood"
+                        or "landuse" in tags
+                        and tags["landuse"] == "forest"
+                    ):
+                        feature_type = "forest"
+                    elif "highway" in tags:
+                        feature_type = "road"
+                    elif (
+                        "waterway" in tags
+                        or "natural" in tags
+                        and tags["natural"] == "water"
+                    ):
+                        feature_type = "water"
+                    else:
+                        continue  # Skip elements we don't care about
+
+                    # Convert way nodes into local Blender meters
+                    local_geometry = []
+                    for node_id in el.get("nodes", []):
+                        if node_id in nodes_lookup:
+                            n_lat, n_lon = nodes_lookup[node_id]
+                            gx, gy = transformer.transform(n_lon, n_lat)
+                            local_geometry.append(
+                                {"x": gx - start_x, "y": gy - start_y}
+                            )
+
+                    if local_geometry:
+                        formatted_features.append(
+                            {
+                                "id": el["id"],
+                                "type": feature_type,
+                                "tags": tags,
+                                "geometry": local_geometry,
+                            }
+                        )
+
         # Save compiled asset outputs
         output_data = {
             "grid_size": GRID_RESOLUTION,
             "terrain": json_terrain,
             "route": json_route,
+            "features": formatted_features,  # Embedded features for Blender
         }
         with open(output_json_path, "w") as f:
             json.dump(output_data, f, indent=4)
@@ -116,7 +171,6 @@ class Route:
 class Map:
     @staticmethod
     def deg_to_tile_xy(lat, lon, zoom):
-        """Converts lat/lon degrees to standard Web Mercator tile X and Y indices."""
         lat_rad = math.radians(lat)
         n = 2.0**zoom
         x = int((lon + 180.0) / 360.0 * n)
@@ -138,9 +192,9 @@ class Map:
         zoom = 16
         min_lat = min(raw_points, key=lambda x: x[0])[0]
         max_lat = max(raw_points, key=lambda x: x[0])[0]
-
         min_lon = min(raw_points, key=lambda x: x[1])[1]
         max_lon = max(raw_points, key=lambda x: x[1])[1]
+
         start_x, start_y = self.deg_to_tile_xy(max_lat, min_lon, zoom)
         end_x, end_y = self.deg_to_tile_xy(min_lat, max_lon, zoom)
 
@@ -149,12 +203,14 @@ class Map:
         return x_min, x_max, y_min, y_max
 
     def gettingGrind(self, x_min, x_max, y_min, y_max, zoom):
-        grindResult: list[tuple[float, float]] = []
-        for x in range(GRID_RESOLUTION):
-            tile_y = y_min + (y_max - y_min) * (x / (GRID_RESOLUTION - 1))
-            for y in range(GRID_RESOLUTION):
-                tile_x = x_min + (x_max - x_min) * (y / (GRID_RESOLUTION - 1))
-                lat, lon = self.tile_xy_to_deg(tile_x, tile_y, zoom)
+        nw_lat, nw_lon = self.tile_xy_to_deg(x_min, y_min, zoom)
+        se_lat, se_lon = self.tile_xy_to_deg(x_max + 1, y_max + 1, zoom)
+
+        grindResult = []
+        for row in range(GRID_RESOLUTION):
+            lat = nw_lat + (se_lat - nw_lat) * (row / (GRID_RESOLUTION - 1))
+            for col in range(GRID_RESOLUTION):
+                lon = nw_lon + (se_lon - nw_lon) * (col / (GRID_RESOLUTION - 1))
                 grindResult.append((lat, lon))
         return grindResult
 
@@ -176,21 +232,12 @@ class Map:
                 if response.status_code == 200:
                     items = response.json().get("items", [])
                     if len(items) != len(chunk):
-                        msg = (
-                            "Elevation API returned "
-                            f"{len(items)} items for {len(chunk)} coordinates"
-                        )
+                        msg = f"Elevation API returned {len(items)} items for {len(chunk)} coordinates"
                         raise RuntimeError(msg)
                     elevations.extend([item["elevation"] for item in items])
                 else:
-                    msg = (
-                        "Elevation API request failed with status "
-                        f"{response.status_code}: {response.text}"
-                    )
+                    msg = f"Elevation API request failed with status {response.status_code}: {response.text}"
                     raise RuntimeError(msg)
-            except requests.exceptions.Timeout:
-                msg = "Elevation API request timed out"
-                raise RuntimeError(msg) from None
             except requests.exceptions.RequestException as e:
                 msg = f"Elevation API network error: {e}"
                 raise RuntimeError(msg) from e
@@ -214,61 +261,98 @@ class Map:
                     url = (
                         f"https://api.mapy.com/v1/maptiles/outdoor/256/{zoom}/{tx}/{ty}"
                     )
-                    resp = requests.get(
-                        url,
-                        params={"apikey": API_KEY},
-                        timeout=5.0,
-                    )
+                    resp = requests.get(url, params={"apikey": API_KEY}, timeout=5.0)
                     resp.raise_for_status()
 
                     tile = Image.open(BytesIO(resp.content))
                     paste_x = (tx - x_start) * tile_size
                     paste_y = (ty - y_start) * tile_size
                     canvas.paste(tile, (paste_x, paste_y))
-
-        except requests.exceptions.Timeout:
-            msg = f"Map tile request timed out"
-            raise RuntimeError(msg) from None
         except requests.exceptions.RequestException as e:
             msg = f"Map tile network error: {e}"
             raise RuntimeError(msg) from e
-
         return canvas
+
+
+class OSMFeatures:
+    @staticmethod
+    def fetch_features(x_min, x_max, y_min, y_max, zoom):
+        map_inst = Map()
+        nw_lat, nw_lon = map_inst.tile_xy_to_deg(x_min, y_min, zoom)
+        se_lat, se_lon = map_inst.tile_xy_to_deg(x_max + 1, y_max + 1, zoom)
+
+        s, w, n, e = (
+            min(nw_lat, se_lat),
+            min(nw_lon, se_lon),
+            max(nw_lat, se_lat),
+            max(nw_lon, se_lon),
+        )
+
+        print(f"Fetching OpenStreetMap elements for bbox: ({s}, {w}, {n}, {e})...")
+
+        overpass_url = "https://overpass.openstreetmap.fr/api/interpreter"
+        query = f"""
+            [out:json][timeout:90];
+            (
+              nw["building"]({s},{w},{n},{e});
+              nw["highway"]({s},{w},{n},{e});
+              nw["natural"="wood"]({s},{w},{n},{e});
+              nw["landuse"="forest"]({s},{w},{n},{e});
+              nw["natural"="water"]({s},{w},{n},{e});
+              nw["waterway"]({s},{w},{n},{e});
+            );
+            out body;
+            >;
+            out skel qt;
+            """
+
+        headers = {
+            "User-Agent": "blenderMapExperiment (contact: josef.pasek17@gmail.com)",
+            "Accept-Encoding": "gzip, deflate",  # Helps speed up data transfer
+        }
+
+        try:
+            response = requests.post(
+                overpass_url, data={"data": query}, headers=headers, timeout=100.0
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"Overpass API error: {response.status_code}")
+                print(f"Server response text: {response.text}")
+                return None
+
+        except Exception as err:
+            print(f"Failed fetching OSM features: {err}")
+            return None
 
 
 def main():
     print("Starting GPX processing...")
     route = Route("/home/tjoslef/skola/blender_experiment/Morning_Run.gpx")
     raw_points, route_elevations = route.parse_gpx("output.json")
-    print(f"Parsed {len(raw_points)} raw points")
-    with open("tmp_raw_points.json", "w") as f:
-        json.dump(raw_points, f)
 
     map_instance = Map()
     zoom = 16
     x_min, x_max, y_min, y_max = map_instance.bonding_area(raw_points)
-    print(f"Bounding area: x=({x_min}, {x_max}), y=({y_min}, {y_max})")
-    with open("tmp_bounds.json", "w") as f:
-        json.dump({"x_min": x_min, "x_max": x_max, "y_min": y_min, "y_max": y_max}, f)
-
     grid_coords = map_instance.gettingGrind(x_min, x_max, y_min, y_max, zoom)
-    print(f"Generated {len(grid_coords)} grid coordinates")
-    with open("tmp_grid_coords.json", "w") as f:
-        json.dump(grid_coords, f)
-
     terrain_elevations = map_instance.gettingElevation(grid_coords)
-    print(f"Fetched {len(terrain_elevations)} terrain elevations")
-    with open("tmp_terrain_elevations.json", "w") as f:
-        json.dump(terrain_elevations, f)
 
-    print(f"Loaded {len(route_elevations)} route elevations from GPX")
-    with open("tmp_route_elevations.json", "w") as f:
-        json.dump(route_elevations, f)
+    # NEW: Pull features inside the calculated bounding boxes
+    osm_raw_data = OSMFeatures.fetch_features(x_min, x_max, y_min, y_max, zoom)
 
+    # Pass the osm data into the coordinate transformer
     route.transformationCord(
-        raw_points, "output.json", grid_coords, terrain_elevations, route_elevations
+        raw_points,
+        "output.json",
+        grid_coords,
+        terrain_elevations,
+        route_elevations,
+        osm_features=osm_raw_data,
     )
     print("Transformation complete, output written to output.json")
+
     tiles2Dmap = map_instance.getTiles(x_min, x_max, y_min, y_max, zoom)
     tiles2Dmap.save("vysledna_mapa.png")
 
