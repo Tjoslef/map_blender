@@ -5,7 +5,7 @@ from typing import Any, Literal, TypedDict
 
 from PIL import Image
 
-from gpx_con import Map, OSMFeatures, Route
+from gpx_con import CoordinateSystem, Map, OSMFeatures, Route
 
 
 class XYPoint(TypedDict):
@@ -80,7 +80,11 @@ def run(gpx_path: str | Path, zoom: int = 16) -> PipelineResult:
 
     output_json = "output.json"
     osm_raw_data = OSMFeatures.fetch_features(x_min, x_max, y_min, y_max, zoom)
+    cs = CoordinateSystem.create(
+        grid_coords[0][0], grid_coords[0][1], route_elevations[0]
+    )
     route.transformationCord(
+        cs,
         raw_points,
         output_json,
         grid_coords,

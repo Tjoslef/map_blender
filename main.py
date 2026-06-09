@@ -1,23 +1,25 @@
 import math
+import os
+import sys
 from pathlib import Path
 
 import bpy
 from mathutils import Vector
 
-from pipeline import from_file, run
-
 BASE_DIR = Path(__file__).resolve().parent
-GPX_PATH = BASE_DIR / "lysa.gpx"
+
+abs_path = str(BASE_DIR)
+# 2. Tell Blender's Python to look in this folder for other modules
+if BASE_DIR not in sys.path:
+    sys.path.append(abs_path)
+
+from pipeline import run
+
+GPX_PATH = BASE_DIR / "Morning_Run.gpx"
 IMAGE_PATH = BASE_DIR / "map_tiles.png"
 BLEND_PATH = BASE_DIR / "gpx_map.blend"
 OUTPUTJSON = BASE_DIR / "output.json"
 SCALE = 0.1  # meters → more manageable size
-
-
-def latlon_to_xy(lat, lon, origin_lat, origin_lon):
-    x = (lon - origin_lon) * math.cos(math.radians(origin_lat)) * 111320
-    y = (lat - origin_lat) * 111320
-    return x, y
 
 
 def create_base_tree():
@@ -25,23 +27,41 @@ def create_base_tree():
     bpy.ops.mesh.primitive_cylinder_add(radius=0.2, depth=3, location=(0, 0, 1.5))
     trunk = bpy.context.active_object
     trunk.name = "BaseTree_Trunk"
-
+    mat = bpy.data.materials.new(trunk.name + "_mat")
+    mat.use_nodes = True
+    mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (
+        0.2,
+        0.1,
+        0.05,
+        1.0,
+    )
+    trunk.data.materials.append(mat)
     bpy.ops.mesh.primitive_ico_sphere_add(radius=2, subdivisions=2, location=(0, 0, 4))
     canopy = bpy.context.active_object
     canopy.name = "BaseTree_Canopy"
+    mat = bpy.data.materials.new(canopy.name + "_mat")
+    mat.use_nodes = True
+    mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (
+        0.08,
+        0.25,
+        0.05,
+        1.0,
+    )
 
+    canopy.data.materials.append(mat)
     trunk.select_set(True)
     bpy.context.view_layer.objects.active = trunk
     bpy.ops.object.join()
 
     tree = bpy.context.active_object
     tree.name = "BaseTree"
-
     # Move to excluded collection so it's not visible directly
     tree_collection = bpy.data.collections.new("TreeAssets")
     bpy.context.scene.collection.children.link(tree_collection)
     tree_collection.objects.link(tree)
-    bpy.context.scene.collection.objects.unlink(tree)
+    for coll in tree.users_collection:
+        if coll != tree_collection:
+            coll.objects.unlink(tree)
     tree_collection.hide_viewport = True  # hidden but usable by GeoNodes
 
     return tree
@@ -104,6 +124,8 @@ def setup_geometry_nodes_scatter(floor_obj, tree_obj):
 
 
 def create_forest_floor(coords, name="ForestFloor"):
+    import bmesh
+
     """Extrude a flat polygon from the OSM outline"""
     mesh = bpy.data.meshes.new(name)
     obj = bpy.data.objects.new(name, mesh)
@@ -111,7 +133,7 @@ def create_forest_floor(coords, name="ForestFloor"):
 
     bm = bmesh.new()
 
-    verts = [bm.verts.new((x, y, 0.0)) for x, y in coords[:-1]]
+    verts = [bm.verts.new((x, y, 0.0)) for x, y, _ in coords[:-1]]
     bm.faces.new(verts)
 
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
@@ -136,17 +158,26 @@ def light():
     for obj in bpy.data.objects:
         if obj.type == "LIGHT":
             bpy.data.objects.remove(obj)
+
     sun = bpy.data.lights.new("Sun", "SUN")
-    sun.energy = 4
-    sun.angle = math.radians(5)
+    sun.energy = 2.0
+    sun.angle = math.radians(2)
+
     sun_obj = bpy.data.objects.new("Sun", sun)
     bpy.context.collection.objects.link(sun_obj)
     sun_obj.rotation_euler = (math.radians(45), 0, math.radians(30))
+
+    # Configure World (Ambient Light)
     world = bpy.context.scene.world
     world.use_nodes = True
     bg = world.node_tree.nodes.new("ShaderNodeBackground")
-    bg.inputs["Color"].default_value = (0.15, 0.15, 0.2, 1)  # subtle blue-gray
-    bg.inputs["Strength"].default_value = 0.4
+
+    # Made the base color a much darker midnight blue
+    bg.inputs["Color"].default_value = (0.05, 0.05, 0.08, 1)
+
+    # CRITICAL: Lowered strength from 0.2 to 0.02. This is what makes shadows actually dark.
+    bg.inputs["Strength"].default_value = 0.02
+
     world.node_tree.links.new(
         bg.outputs["Background"],
         world.node_tree.nodes["World Output"].inputs["Surface"],
@@ -200,6 +231,12 @@ def course(result):
     curve_obj.data.materials.append(red_mat)
 
 
+def get_terrain_z(x, y, terrain_pts):
+    """Find z of the nearest terrain point to (x, y)"""
+    nearest = min(terrain_pts, key=lambda p: (p["x"] - x) ** 2 + (p["y"] - y) ** 2)
+    return nearest["z"]
+
+
 def main():
     for obj in list(bpy.data.objects):
         bpy.data.objects.remove(obj)
@@ -210,6 +247,10 @@ def main():
     vertices = [
         (pt["x"] * SCALE, pt["y"] * SCALE, pt["z"] * SCALE) for pt in result.terrain
     ]
+    xs = [pt["x"] for pt in result.terrain]
+    ys = [pt["y"] for pt in result.terrain]
+    print(f"Terrain X: {min(xs):.1f} to {max(xs):.1f}")
+    print(f"Terrain Y: {min(ys):.1f} to {max(ys):.1f}")
     quads = []
     for r in range(res - 1):
         for c in range(res - 1):
@@ -266,8 +307,23 @@ def main():
     else:
         print(f"POZOR: Obrázek na cestě {IMAGE_PATH} nebyl nalezen!")
 
-    # Propojíme texturu s barvou materiálu (Color -> Base Color)
-    links.new(texture_node.outputs["Color"], principled.inputs["Base Color"])
+    # 1. Přidáme Gamma uzel pro ztmavení textury
+    gamma_node = nodes.new(type="ShaderNodeGamma")
+    gamma_node.inputs[
+        "Gamma"
+    ].default_value = 1.5  # Hodnota > 1.0 ztmavuje střední tóny
+
+    # 2. Přidáme Bump uzel pro 3D efekt terénu
+    bump_node = nodes.new(type="ShaderNodeBump")
+    bump_node.inputs["Strength"].default_value = 0.5  # Síla reliéfu
+
+    # 3. Zapojení: Textura -> Gamma -> Principled (Base Color)
+    links.new(texture_node.outputs["Color"], gamma_node.inputs["Color"])
+    links.new(gamma_node.outputs["Color"], principled.inputs["Base Color"])
+
+    # 4. Zapojení: Textura -> Bump -> Principled (Normal)
+    links.new(texture_node.outputs["Color"], bump_node.inputs["Height"])
+    links.new(bump_node.outputs["Normal"], principled.inputs["Normal"])
 
     # Přiřadíme hotový materiál našemu terénu
     if len(terrain_obj.data.materials) == 0:
@@ -279,6 +335,7 @@ def main():
     bpy.ops.wm.save_as_mainfile(filepath=str(BLEND_PATH))
     print(f"Saved Blender scene to {BLEND_PATH}")
     print("3D Terén s texturou byl úspěšně vygenerován!")
+    print(f"Min and Max coordination {result.bounds}")
 
 
 def draw_buildings(buildings):
@@ -294,15 +351,32 @@ def draw_buildings(buildings):
         bpy.context.collection.objects.link(obj)
 
 
-def draw_forests(forests):
+def draw_forests(forests, terrain_pts):
     base_tree = create_base_tree()
     for feature in forests:
         pts = feature["geometry"]
+        print(f"Forest {feature['id']}: {len(pts)} pts, first={pts[0]}, last={pts[-1]}")
         if len(pts) < 3:
             continue
-        coords = [(pt["x"] * SCALE, pt["y"] * SCALE, 0.05) for pt in pts]
+        coords = [
+            (
+                pt["x"] * SCALE,
+                pt["y"] * SCALE,
+                get_terrain_z(pt["x"], pt["y"], terrain_pts) * SCALE + 0.05,
+            )
+            for pt in pts
+        ]
         floor = create_forest_floor(coords, name=f"Forest_{feature}")
         setup_geometry_nodes_scatter(floor, base_tree)
+    forest_x = []
+    forest_y = []
+
+    for feature in forests:
+        for p in feature["geometry"]:
+            forest_x.append(p["x"])
+            forest_y.append(p["y"])
+
+    print("Forest bounds:", min(forest_x), max(forest_x), min(forest_y), max(forest_y))
 
 
 def draw_water(water_features):
@@ -352,12 +426,12 @@ def parser_features(result):
         if ftype in features_by_type:
             features_by_type[ftype].append(feature)
 
-    if features_by_type["building"]:
-        draw_buildings(features_by_type["building"])
+    # if features_by_type["building"]:
+    #   draw_buildings(features_by_type["building"])
+    if features_by_type["forest"]:
+        draw_forests(features_by_type["forest"], result.terrain)
 
 
-# if features_by_type["forest"]:
-#    draw_forests(features_by_type["forest"])
 # if features_by_type["water"]:
 #   draw_water(features_by_type["water"])
 # if features_by_type["road"]:

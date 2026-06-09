@@ -38,17 +38,59 @@ GRID_RESOLUTION = 120
 API_KEY = os.getenv("GEOLOCATION_API_KEY")
 
 
+class CoordinateSystem:
+    _instance = None
+
+    @classmethod
+    def create(cls, origin_lat, origin_lon, origin_z=0.0):
+        cls._instance = cls(origin_lat, origin_lon, origin_z)
+        return cls._instance
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            raise RuntimeError(
+                "CoordinateSystem not initialized. Call create() first."
+            )
+        return cls._instance
+
+    def __init__(self, origin_lat, origin_lon, origin_z=0.0):
+        self.origin_lat = origin_lat
+        self.origin_lon = origin_lon
+        self.origin_z = origin_z
+        epsg, zone = self._get_utm_epsg(origin_lat, origin_lon)
+        self.epsg = epsg
+        self.zone = zone
+        self._transformer = Transformer.from_crs("EPSG:4326", epsg, always_xy=True)
+        self.origin_x, self.origin_y = self._transformer.transform(
+            origin_lon, origin_lat
+        )
+        print(f"Detected Location: Lat {origin_lat}, Lon {origin_lon}")
+        print(f"Automatically assigning projection to {epsg} (UTM Zone {zone})")
+
+    @staticmethod
+    def _get_utm_epsg(lat, lon):
+        zone = int(math.floor((lon + 180) / 6) + 1)
+        if lat >= 0:
+            epsg = f"EPSG:326{zone:02d}"
+        else:
+            epsg = f"EPSG:327{zone:02d}"
+        return epsg, zone
+
+    def to_local(self, lat, lon, elevation=0.0):
+        gx, gy = self._transformer.transform(lon, lat)
+        return (gx - self.origin_x, gy - self.origin_y, elevation - self.origin_z)
+
+    def to_global(self, x, y):
+        lon, lat = self._transformer.transform(
+            x + self.origin_x, y + self.origin_y, direction="INVERSE"
+        )
+        return (lat, lon)
+
+
 class Route:
     def __init__(self, file_name):
         self.gpx_file = file_name
-
-    def get_utm_epsg(self, lat, lon):
-        zone_number = int(math.floor((lon + 180) / 6) + 1)
-        if lat >= 0:
-            epsg_code = f"EPSG:326{zone_number:02d}"
-        else:
-            epsg_code = f"EPSG:327{zone_number:02d}"
-        return epsg_code, zone_number
 
     def parse_gpx(self, output_json_path):
         tree = et.parse(self.gpx_file)
@@ -69,48 +111,26 @@ class Route:
 
     def transformationCord(
         self,
+        cs: CoordinateSystem,
         raw_points: list[tuple[float, float]],
         output_json_path: str,
         grid_coords: list[tuple[float, float]],
         terrain_elevations: list[float],
         route_elevations: list[float],
-        osm_features=None,  # Added parameter for OSM data
+        osm_features=None,
     ):
-        start_lat, start_lon = grid_coords[0]
-        epsg_target, zone = self.get_utm_epsg(start_lat, start_lon)
-        print(f"Detected Location: Lat {start_lat}, Lon {start_lon}")
-        print(f"Automatically assigning projection to {epsg_target} (UTM Zone {zone})")
-
-        transformer = Transformer.from_crs("EPSG:4326", epsg_target, always_xy=True)
-        start_x, start_y = transformer.transform(start_lon, start_lat)
-        start_z = route_elevations[0]
-
-        # Format Flat Terrain Output Matrix
         json_terrain = []
         for (lat, lon), ele in zip(grid_coords, terrain_elevations, strict=False):
-            gx, gy = transformer.transform(lon, lat)
-            json_terrain.append(
-                {"x": gx - start_x, "y": gy - start_y, "z": ele - start_z}
-            )
+            x, y, z = cs.to_local(lat, lon, ele)
+            json_terrain.append({"x": x, "y": y, "z": z})
 
-        # Format Route Path Output
         json_route = []
         for (lat, lon), ele in zip(raw_points, route_elevations, strict=False):
-            gx, gy = transformer.transform(lon, lat)
-            json_route.append(
-                {"x": gx - start_x, "y": gy - start_y, "z": ele - start_z}
-            )
+            x, y, z = cs.to_local(lat, lon, ele)
+            json_route.append({"x": x, "y": y, "z": z})
 
-        # Process OSM Features to localized coordinates
         formatted_features = []
         if osm_features and "elements" in osm_features:
-            # Map node IDs to coordinates for quick lookup
-            nodes_lookup = {
-                el["id"]: (el["lat"], el["lon"])
-                for el in osm_features["elements"]
-                if el["type"] == "node"
-            }
-
             for el in osm_features["elements"]:
                 if el["type"] == "way":
                     feature_type = "unknown"
@@ -134,17 +154,12 @@ class Route:
                     ):
                         feature_type = "water"
                     else:
-                        continue  # Skip elements we don't care about
+                        continue
 
-                    # Convert way nodes into local Blender meters
                     local_geometry = []
-                    for node_id in el.get("nodes", []):
-                        if node_id in nodes_lookup:
-                            n_lat, n_lon = nodes_lookup[node_id]
-                            gx, gy = transformer.transform(n_lon, n_lat)
-                            local_geometry.append(
-                                {"x": gx - start_x, "y": gy - start_y}
-                            )
+                    for node in el.get("geometry", []):
+                        x, y, _ = cs.to_local(node["lat"], node["lon"])
+                        local_geometry.append({"x": x, "y": y})
 
                     if local_geometry:
                         formatted_features.append(
@@ -250,7 +265,9 @@ class Map:
         tile_size = 256
         y_start, y_end = min(y_min, y_max), max(y_min, y_max)
         x_start, x_end = min(x_min, x_max), max(x_min, x_max)
-
+        print(
+            f"tiles borders what i get y_start {y_start} , y_end {y_end} , x_start {x_start} , x_end {x_end}"
+        )
         total_w = (x_end - x_start + 1) * tile_size
         total_h = (y_end - y_start + 1) * tile_size
         canvas = Image.new("RGB", (total_w, total_h))
@@ -278,32 +295,30 @@ class OSMFeatures:
     @staticmethod
     def fetch_features(x_min, x_max, y_min, y_max, zoom):
         map_inst = Map()
-        nw_lat, nw_lon = map_inst.tile_xy_to_deg(x_min, y_min, zoom)
-        se_lat, se_lon = map_inst.tile_xy_to_deg(x_max + 1, y_max + 1, zoom)
-
-        s, w, n, e = (
-            min(nw_lat, se_lat),
-            min(nw_lon, se_lon),
-            max(nw_lat, se_lat),
-            max(nw_lon, se_lon),
+        y_start, y_end = min(y_min, y_max), max(y_min, y_max)
+        x_start, x_end = min(x_min, x_max), max(x_min, x_max)
+        print(
+            f"features borders what i get y_start {y_start} , y_end {y_end} , x_start {x_start} , x_end {x_end}"
         )
+        nw_lat, nw_lon = map_inst.tile_xy_to_deg(x_start, y_start, zoom)
+        se_lat, se_lon = map_inst.tile_xy_to_deg(x_end + 1, y_end + 1, zoom)
 
-        print(f"Fetching OpenStreetMap elements for bbox: ({s}, {w}, {n}, {e})...")
+        print(
+            f"Fetching OpenStreetMap elements for bbox: ({nw_lat}, {nw_lon}, {se_lat}, {se_lon})"
+        )
 
         overpass_url = "https://overpass.openstreetmap.fr/api/interpreter"
         query = f"""
             [out:json][timeout:90];
             (
-              nw["building"]({s},{w},{n},{e});
-              nw["highway"]({s},{w},{n},{e});
-              nw["natural"="wood"]({s},{w},{n},{e});
-              nw["landuse"="forest"]({s},{w},{n},{e});
-              nw["natural"="water"]({s},{w},{n},{e});
-              nw["waterway"]({s},{w},{n},{e});
+              way["building"]({se_lat},{nw_lon},{nw_lat},{se_lon});
+              way["highway"]({se_lat},{nw_lon},{nw_lat},{se_lon});
+              way["natural"="wood"]({se_lat},{nw_lon},{nw_lat},{se_lon});
+              way["landuse"="forest"]({se_lat},{nw_lon},{nw_lat},{se_lon});
+              way["natural"="water"]({se_lat},{nw_lon},{nw_lat},{se_lon});
+              way["waterway"]({se_lat},{nw_lon},{nw_lat},{se_lon});
             );
-            out body;
-            >;
-            out skel qt;
+            out geom;
             """
 
         headers = {
@@ -337,13 +352,14 @@ def main():
     zoom = 16
     x_min, x_max, y_min, y_max = map_instance.bonding_area(raw_points)
     grid_coords = map_instance.gettingGrind(x_min, x_max, y_min, y_max, zoom)
+    osm_raw_data = OSMFeatures.fetch_features(x_min, x_max, y_min, y_max, zoom)
     terrain_elevations = map_instance.gettingElevation(grid_coords)
 
-    # NEW: Pull features inside the calculated bounding boxes
-    osm_raw_data = OSMFeatures.fetch_features(x_min, x_max, y_min, y_max, zoom)
-
-    # Pass the osm data into the coordinate transformer
+    cs = CoordinateSystem.create(
+        grid_coords[0][0], grid_coords[0][1], route_elevations[0]
+    )
     route.transformationCord(
+        cs,
         raw_points,
         "output.json",
         grid_coords,
