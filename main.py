@@ -22,52 +22,13 @@ OUTPUTJSON = BASE_DIR / "output.json"
 SCALE = 0.1  # meters → more manageable size
 
 
-def create_base_tree():
-
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.2, depth=3, location=(0, 0, 1.5))
-    trunk = bpy.context.active_object
-    trunk.name = "BaseTree_Trunk"
-    mat = bpy.data.materials.new(trunk.name + "_mat")
-    mat.use_nodes = True
-    mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (
-        0.2,
-        0.1,
-        0.05,
-        1.0,
-    )
-    trunk.data.materials.append(mat)
-    bpy.ops.mesh.primitive_ico_sphere_add(radius=2, subdivisions=2, location=(0, 0, 4))
-    canopy = bpy.context.active_object
-    canopy.name = "BaseTree_Canopy"
-    mat = bpy.data.materials.new(canopy.name + "_mat")
-    mat.use_nodes = True
-    mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (
-        0.08,
-        0.25,
-        0.05,
-        1.0,
-    )
-
-    canopy.data.materials.append(mat)
-    trunk.select_set(True)
-    bpy.context.view_layer.objects.active = trunk
-    bpy.ops.object.join()
-
-    tree = bpy.context.active_object
-    tree.name = "BaseTree"
-    # Move to excluded collection so it's not visible directly
-    tree_collection = bpy.data.collections.new("TreeAssets")
-    bpy.context.scene.collection.children.link(tree_collection)
-    tree_collection.objects.link(tree)
-    for coll in tree.users_collection:
-        if coll != tree_collection:
-            coll.objects.unlink(tree)
-    tree_collection.hide_viewport = True  # hidden but usable by GeoNodes
-
-    return tree
-
-
 def setup_geometry_nodes_scatter(floor_obj, tree_obj):
+    import math
+
+    # Clean up any existing modifier with same name
+    if "ForestScatter" in floor_obj.modifiers:
+        floor_obj.modifiers.remove(floor_obj.modifiers["ForestScatter"])
+
     mod = floor_obj.modifiers.new("ForestScatter", "NODES")
     node_group = bpy.data.node_groups.new("ForestScatter", "GeometryNodeTree")
     mod.node_group = node_group
@@ -75,7 +36,7 @@ def setup_geometry_nodes_scatter(floor_obj, tree_obj):
     nodes = node_group.nodes
     links = node_group.links
 
-    # Interface
+    # --- Interface ---
     node_group.interface.new_socket(
         "Geometry", in_out="INPUT", socket_type="NodeSocketGeometry"
     )
@@ -83,72 +44,105 @@ def setup_geometry_nodes_scatter(floor_obj, tree_obj):
         "Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry"
     )
 
-    input_node = nodes.new("NodeGroupInput")
-    input_node.location = (-600, 0)
-    output_node = nodes.new("NodeGroupOutput")
-    output_node.location = (600, 0)
+    group_in = nodes.new("NodeGroupInput")
+    group_in.location = (-800, 0)
+    group_out = nodes.new("NodeGroupOutput")
+    group_out.location = (1200, 0)
 
-    # Distribute points on faces
+    # --- Distribute Points on Faces ---
     distribute = nodes.new("GeometryNodeDistributePointsOnFaces")
-    distribute.location = (-300, 0)
-    distribute.inputs["Density"].default_value = 0.02  # trees/m²
+    distribute.location = (-500, 0)
+    distribute.inputs["Density"].default_value = 0.001
+    links.new(group_in.outputs[0], distribute.inputs["Mesh"])
 
-    # Instance on points
-    instance = nodes.new("GeometryNodeInstanceOnPoints")
-    instance.location = (0, 0)
-
-    # Object info (the tree object)
+    # --- Object Info (your tree) ---
     obj_info = nodes.new("GeometryNodeObjectInfo")
-    obj_info.location = (-300, -200)
+    obj_info.location = (-500, -250)
     obj_info.inputs["Object"].default_value = tree_obj
+    obj_info.transform_space = "ORIGINAL"
 
-    # Random rotation
-    rand_rot = nodes.new("FunctionNodeRandomValue")
-    rand_rot.location = (-300, 200)
-    rand_rot.data_type = "FLOAT"
-    rand_rot.inputs[2].default_value = 0.0
-    rand_rot.inputs[3].default_value = math.tau
-
-    # Join geometry
-    join = nodes.new("GeometryNodeJoinGeometry")
-    join.location = (300, 0)
-
-    # Wire it up
-    links.new(input_node.outputs["Geometry"], distribute.inputs["Mesh"])
+    # --- Instance on Points ---
+    # distribute.outputs["Rotation"] already encodes the face normal — no align node needed
+    instance = nodes.new("GeometryNodeInstanceOnPoints")
+    instance.location = (-150, 0)
     links.new(distribute.outputs["Points"], instance.inputs["Points"])
+    links.new(distribute.outputs["Rotation"], instance.inputs["Rotation"])
     links.new(obj_info.outputs["Geometry"], instance.inputs["Instance"])
-    links.new(rand_rot.outputs["Value"], instance.inputs["Rotation"])
-    links.new(instance.outputs["Instances"], join.inputs["Geometry"])
-    links.new(input_node.outputs["Geometry"], join.inputs["Geometry"])
-    links.new(join.outputs["Geometry"], output_node.inputs["Geometry"])
+
+    # --- Random Z rotation (so trees don't all face same direction) ---
+    rand_z = nodes.new("FunctionNodeRandomValue")
+    rand_z.location = (-150, -250)
+    rand_z.data_type = "FLOAT_VECTOR"
+    rand_z.inputs["Min"].default_value = (0.0, 0.0, 0.0)
+    rand_z.inputs["Max"].default_value = (0.0, 0.0, math.tau)
+
+    rotate_inst = nodes.new("GeometryNodeRotateInstances")
+    rotate_inst.location = (150, 0)
+    rotate_inst.inputs["Local Space"].default_value = True
+    links.new(instance.outputs["Instances"], rotate_inst.inputs["Instances"])
+    links.new(rand_z.outputs["Value"], rotate_inst.inputs["Rotation"])
+
+    # --- Random scale variation ---
+    rand_scale = nodes.new("FunctionNodeRandomValue")
+    rand_scale.location = (150, -250)
+    rand_scale.data_type = "FLOAT_VECTOR"
+    rand_scale.inputs["Min"].default_value = (0.8, 0.8, 0.8)
+    rand_scale.inputs["Max"].default_value = (1.3, 1.3, 1.6)
+
+    scale_inst = nodes.new("GeometryNodeScaleInstances")
+    scale_inst.location = (450, 0)
+    links.new(rotate_inst.outputs["Instances"], scale_inst.inputs["Instances"])
+    links.new(rand_scale.outputs["Value"], scale_inst.inputs["Scale"])
+
+    # --- Join floor + instances ---
+    join = nodes.new("GeometryNodeJoinGeometry")
+    join.location = (800, 0)
+    links.new(scale_inst.outputs["Instances"], join.inputs["Geometry"])
+    links.new(group_in.outputs[0], join.inputs["Geometry"])
+    links.new(join.outputs["Geometry"], group_out.inputs[0])
 
 
 def create_forest_floor(coords, name="ForestFloor"):
     import bmesh
 
-    """Extrude a flat polygon from the OSM outline"""
     mesh = bpy.data.meshes.new(name)
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.collection.objects.link(obj)
 
     bm = bmesh.new()
+    verts = [bm.verts.new((x, y, z)) for x, y, z in coords[:-1]]
 
-    verts = [bm.verts.new((x, y, 0.0)) for x, y, _ in coords[:-1]]
-    bm.faces.new(verts)
+    try:
+        bm.faces.new(verts)
+    except Exception as e:
+        print(f"[{name}] Face creation failed: {e}")
+        bm.free()
+        return obj
 
+    bm.faces.ensure_lookup_table()
+    bm.verts.ensure_lookup_table()
+
+    # Recalc first to get consistent state
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+    # Then force every face normal to point up — reliable regardless of winding
+    for face in bm.faces:
+        if face.normal.dot(Vector((0, 0, 1))) < 0:
+            bmesh.ops.reverse_faces(
+                bm, faces=[face]
+            )  # <-- correct API, not face.normal_flip()
+
     bm.to_mesh(mesh)
     bm.free()
 
-    # Green forest floor material
+    # Recalc normals on the final mesh too
+
     mat = bpy.data.materials.new(name + "_mat")
     mat.use_nodes = True
-    mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (
-        0.08,
-        0.25,
-        0.05,
-        1.0,
-    )
+    bsdf = mat.node_tree.nodes["Principled BSDF"]
+    bsdf.inputs["Base Color"].default_value = (0.08, 0.25, 0.05, 1.0)
+    bsdf.inputs["Alpha"].default_value = 0.5
+    mat.blend_method = "BLEND"
     obj.data.materials.append(mat)
 
     return obj
@@ -307,23 +301,41 @@ def main():
     else:
         print(f"POZOR: Obrázek na cestě {IMAGE_PATH} nebyl nalezen!")
 
-    # 1. Přidáme Gamma uzel pro ztmavení textury
+    hue_sat = nodes.new(type="ShaderNodeHueSaturation")
+    hue_sat.inputs["Saturation"].default_value = 2.2  # 1.0 = neutral, 2.0+ = vivid
+    hue_sat.inputs["Value"].default_value = 1.1  # slight brightness boost
+    hue_sat.inputs["Hue"].default_value = 0.5  # 0.5 = no hue shift
+
+    # 2. Color Ramp — increase contrast, crush blacks, lift highlights
+    ramp = nodes.new(type="ShaderNodeValToRGB")
+    ramp.color_ramp.interpolation = "EASE"
+    ramp.color_ramp.elements[0].position = 0.15  # crush dark end
+    ramp.color_ramp.elements[1].position = 0.90  # lift bright end
+    # make it a color ramp not greyscale — keep RGB by feeding Color not Value
+    ramp.color_ramp.color_mode = "RGB"
+
+    # 3. Gamma — subtle, just 1.1 now since ramp does the heavy lifting
     gamma_node = nodes.new(type="ShaderNodeGamma")
-    gamma_node.inputs[
-        "Gamma"
-    ].default_value = 1.5  # Hodnota > 1.0 ztmavuje střední tóny
+    gamma_node.inputs["Gamma"].default_value = 1.1
 
     # 2. Přidáme Bump uzel pro 3D efekt terénu
     bump_node = nodes.new(type="ShaderNodeBump")
     bump_node.inputs["Strength"].default_value = 0.5  # Síla reliéfu
 
-    # 3. Zapojení: Textura -> Gamma -> Principled (Base Color)
-    links.new(texture_node.outputs["Color"], gamma_node.inputs["Color"])
+    # --- Wire it up ---
+    # Texture -> HueSat -> Ramp -> Gamma -> Base Color
+    links.new(texture_node.outputs["Color"], hue_sat.inputs["Color"])
+    links.new(hue_sat.outputs["Color"], ramp.inputs["Fac"])  # ramp on luminance
+    links.new(hue_sat.outputs["Color"], gamma_node.inputs["Color"])  # color stays vivid
     links.new(gamma_node.outputs["Color"], principled.inputs["Base Color"])
 
-    # 4. Zapojení: Textura -> Bump -> Principled (Normal)
+    # Bump from original texture
     links.new(texture_node.outputs["Color"], bump_node.inputs["Height"])
     links.new(bump_node.outputs["Normal"], principled.inputs["Normal"])
+
+    # Less metallic/specular so colors read more matte and saturated
+    principled.inputs["Roughness"].default_value = 0.85
+    principled.inputs["Specular IOR Level"].default_value = 0.1
 
     # Přiřadíme hotový materiál našemu terénu
     if len(terrain_obj.data.materials) == 0:
@@ -352,31 +364,127 @@ def draw_buildings(buildings):
 
 
 def draw_forests(forests, terrain_pts):
-    base_tree = create_base_tree()
+    base_dir = Path(BASE_DIR)
+    tree_blend = base_dir / "tree.blend"
+
+    if not tree_blend.exists():
+        print(f"ERROR: File not found at {tree_blend}")
+        return
+
+    inner_dir = "Collection"
+    collection_name = "tree"  # Change this if your collection has a different name
+
+    filepath = str(tree_blend / inner_dir / collection_name).replace("\\", "/")
+    directory = str(tree_blend / inner_dir).replace("\\", "/") + "/"
+
+    print(f"Attempting to append from: {directory} with filename: {collection_name}")
+
+    existing_collections = set(bpy.data.collections)
+
+    try:
+        bpy.ops.wm.append(
+            filepath=filepath, directory=directory, filename=collection_name, link=False
+        )
+    except Exception as e:
+        print(f"CRITICAL ERROR during append execution: {e}")
+        return
+
+    new_collections = set(bpy.data.collections) - existing_collections
+    if new_collections:
+        imported_collection = new_collections.pop()
+        print(
+            f"Successfully appended new collection data: '{imported_collection.name}'"
+        )
+    else:
+        imported_collection = bpy.data.collections.get(collection_name)
+        print(
+            f"No new collection added. Using existing data block: '{collection_name}'"
+        )
+
+    if not imported_collection:
+        print("ERROR: Could not find or access the target collection data block.")
+        return
+
+    if imported_collection.name not in bpy.context.scene.collection.children:
+        bpy.context.scene.collection.children.link(imported_collection)
+
+    mesh_objects = [obj for obj in imported_collection.objects if obj.type == "MESH"]
+    print(f"Found {len(mesh_objects)} mesh objects inside the collection.")
+
+    if not mesh_objects:
+        print("ERROR: No mesh objects found to join.")
+        return
+
+    bpy.ops.object.select_all(action="DESELECT")
+    final_objects_to_join = []
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    for obj in mesh_objects:
+        has_modifiers = any(mod.show_viewport for mod in obj.modifiers)
+        if has_modifiers:
+            print(f"Baking modifiers for: {obj.name} (Trunk/Branches)")
+            obj_eval = obj.evaluated_get(depsgraph)
+            baked_mesh = bpy.data.meshes.new_from_object(
+                obj_eval, preserve_all_data_layers=True, depsgraph=depsgraph
+            )
+            new_obj = bpy.data.objects.new(
+                name=f"Baked_{obj.name}", object_data=baked_mesh
+            )
+            imported_collection.objects.link(new_obj)
+            new_obj.matrix_world = obj.matrix_world
+            final_objects_to_join.append(new_obj)
+            bpy.data.objects.remove(obj, do_unlink=True)
+        else:
+            print(f"Keeping original mesh: {obj.name} (Leaves - no modifiers needed)")
+            final_objects_to_join.append(obj)
+    bpy.context.view_layer.update()
+    for obj in final_objects_to_join:
+        obj.select_set(True)
+
+    bpy.context.view_layer.objects.active = final_objects_to_join[0]
+
+    print("Joining baked components and original leaves into a unified tree asset...")
+    bpy.ops.object.join()
+
+    tree_asset = bpy.context.active_object
+    tree_asset.name = "ImportedTree"
+    tree_asset.hide_viewport = True
+    print(f"Tree asset '{tree_asset.name}' is verified and ready.")
+
+    # 3. Process Forests and Build Floors
     for feature in forests:
         pts = feature["geometry"]
         print(f"Forest {feature['id']}: {len(pts)} pts, first={pts[0]}, last={pts[-1]}")
         if len(pts) < 3:
+            print(
+                f"Skipping Forest {feature['id']}: Not enough points to make a polygon floor."
+            )
             continue
+
         coords = [
             (
                 pt["x"] * SCALE,
                 pt["y"] * SCALE,
-                get_terrain_z(pt["x"], pt["y"], terrain_pts) * SCALE + 0.05,
+                get_terrain_z(pt["x"], pt["y"], terrain_pts) * SCALE
+                + 0.05,  # Assumes get_terrain_z is defined
             )
             for pt in pts
         ]
-        floor = create_forest_floor(coords, name=f"Forest_{feature}")
-        setup_geometry_nodes_scatter(floor, base_tree)
-    forest_x = []
-    forest_y = []
 
-    for feature in forests:
-        for p in feature["geometry"]:
-            forest_x.append(p["x"])
-            forest_y.append(p["y"])
+        # Build the geometry floor mesh (Assumes create_forest_floor is defined)
+        floor = create_forest_floor(coords, name=f"Forest_{feature['id']}")
 
-    print("Forest bounds:", min(forest_x), max(forest_x), min(forest_y), max(forest_y))
+        # Inject the floor object and the tree asset into your scattering setup
+        if floor:
+            setup_geometry_nodes_scatter(floor, tree_asset)
+
+    # 4. Global Coordinate Bounds Diagnostic
+    forest_x = [p["x"] for feature in forests for p in feature["geometry"]]
+    forest_y = [p["y"] for feature in forests for p in feature["geometry"]]
+
+    if forest_x and forest_y:
+        print(
+            f"Forest bounds: X({min(forest_x):.2f} to {max(forest_x):.2f}), Y({min(forest_y):.2f} to {max(forest_y):.2f})"
+        )
 
 
 def draw_water(water_features):

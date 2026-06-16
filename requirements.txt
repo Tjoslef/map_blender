@@ -1,0 +1,11 @@
+# External Python libraries required to run this project
+# Install with: pip install -r requirements.txt
+# Note: This project is designed to run inside Blender.
+# The following modules are built into Blender and do NOT need to be pip-installed:
+#   bpy, mathutils, bmesh
+
+Pillow>=10.0.0
+requests>=2.31.0
+pyproj>=3.6.0
+python-dotenv>=1.0.0
+defusedxml>=0.7.1
